@@ -1,0 +1,9 @@
+# Python dependencies for SCA_examine_ICs.
+# NOTE: two dependencies are NOT on PyPI and must be installed separately:
+#   - mysca  : the SCA package that produced the results folder (pip install -e /path/to/mysca)
+#   - FAMSA  : guide-tree binary on PATH (https://github.com/refresh-bio/FAMSA)
+numpy
+pandas
+scipy
+matplotlib
+biopython
