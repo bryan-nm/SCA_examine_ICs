@@ -94,10 +94,8 @@ def onehot_from_int_msa(msa_int, n_aa=20):
     return xmsa
 
 
-def project_subsample(sca_dir, msa_int_sub):
+def project_subsample(sca, msa_int_sub):
     """Uᵖ scores (n_sub x K) for the subsampled integerized MSA."""
-    from mysca.results import SCAResults
-    sca = SCAResults.load(sca_dir)
     n_aa = sca.fia.shape[1]
     xmsa = onehot_from_int_msa(msa_int_sub, n_aa=n_aa)
     return sca.project_sequences(xmsa)
@@ -171,7 +169,7 @@ def null_lambda_lrt_distribution(geom, leaf_ids, code, n_symbols, n_tips,
     return lams, lrts
 
 
-def run_pagel(tree_text, acc_to_row, axis_cols, transform=True,
+def run_pagel(tree_text, acc_to_row, comp_names, transform=True,
               boundary_correction=True, aligned_seqs=None, n_null=0, seed=0):
     tree = pg.parse_newick_iterative(tree_text)
     tree_acc = {pg.extract_accession_from_leaf(tree["name"][i])
@@ -189,7 +187,7 @@ def run_pagel(tree_text, acc_to_row, axis_cols, transform=True,
 
     rows = []
     y_by_node = np.zeros(geom["n_nodes"], dtype=np.float64)
-    for k, col in enumerate(axis_cols):
+    for k, col in enumerate(comp_names):
         vals = proj[:, k]
         if transform:
             vals = pg.van_der_waerden(vals)
@@ -202,9 +200,11 @@ def run_pagel(tree_text, acc_to_row, axis_cols, transform=True,
             pval = 0.5 * float(stats.chi2.sf(lrt, df=1))
         else:
             pval = float(stats.chi2.sf(lrt, df=1))
-        rows.append({"component": col, "lambda": lam, "LRT": lrt,
+        # lamP = Pagel's lambda (phylogenetic signal), named to avoid clashing
+        # with the SCA component magnitude "lambda" reported elsewhere.
+        rows.append({"component": col, "lamP": lam, "LRT": lrt,
                      "p_value": pval, "n": n_tips})
-        print(f"    {col:>6}: lambda={lam:6.6f}  LRT={lrt:9.2f}  p={pval:.3e}",
+        print(f"    {col}: lamP={lam:6.6f}  LRT={lrt:9.2f}  p={pval:.3e}",
               file=sys.stderr)
 
     out = pd.DataFrame(rows)
@@ -229,12 +229,12 @@ def run_pagel(tree_text, acc_to_row, axis_cols, transform=True,
         nm = float(null_lams.mean())
         ns = float(null_lams.std(ddof=1)) if n_null > 1 else 0.0
         qd = np.quantile(null_lams, [0.5, 0.95, 0.99])
-        print(f"  null lambda: mean={nm:.4f} sd={ns:.4f} median={qd[0]:.4f} "
+        print(f"  null lamP: mean={nm:.4f} sd={ns:.4f} median={qd[0]:.4f} "
               f"p95={qd[1]:.4f} p99={qd[2]:.4f}", file=sys.stderr)
-        lam_obs = out["lambda"].to_numpy()
-        out["lambda_null_mean"] = nm
-        out["lambda_null_sd"] = ns
-        out["lambda_z"] = (lam_obs - nm) / ns if ns > 0 else np.nan
+        lam_obs = out["lamP"].to_numpy()
+        out["lamP_null_mean"] = nm
+        out["lamP_null_sd"] = ns
+        out["lamP_z"] = (lam_obs - nm) / ns if ns > 0 else np.nan
         out["p_vs_null"] = [(1 + int(np.sum(null_lams >= lo))) / (n_null + 1)
                             for lo in lam_obs]
         out["p_vs_null_BH"] = pg.bh_fdr(out["p_vs_null"].to_numpy())
@@ -261,9 +261,9 @@ def run_pagel(tree_text, acc_to_row, axis_cols, transform=True,
 # Best clade split over every IC (reuses Identify_tree_splits kernels)
 # ---------------------------------------------------------------------------
 
-def run_splits(tree_text, acc_to_row, axis_cols, min_side_size, seed):
+def run_splits(tree_text, acc_to_row, comp_names, min_side_size, seed):
     rng = np.random.default_rng(seed)
-    K = len(axis_cols)
+    K = len(comp_names)
     tree = sp.parse_newick_iterative(tree_text)
 
     X, valid, _accs, matched = sp.build_leaf_value_matrix(tree, acc_to_row, K)
@@ -287,7 +287,7 @@ def run_splits(tree_text, acc_to_row, axis_cols, min_side_size, seed):
     for k in range(K):
         col = p_mwu[:, k]
         if not np.any(np.isfinite(col)):
-            print(f"    {axis_cols[k]:>6}: no valid split", file=sys.stderr)
+            print(f"    {comp_names[k]}: no valid split", file=sys.stderr)
             continue
         idx = int(np.nanargmin(col))
         node_id = int(cand[idx])
@@ -304,7 +304,7 @@ def run_splits(tree_text, acc_to_row, axis_cols, min_side_size, seed):
             clade_leaves, clade_size, comp_size = complement, nB, nA
             mean_clade, mean_comp, cliffs = mB, mA, -cliffs_delta_A
         rows.append({
-            "component": axis_cols[k],
+            "component": comp_names[k],
             "bipartition_id": sp.bipartition_id(tree, clade_leaves),
             "clade_size": clade_size,
             "complement_size": comp_size,
@@ -319,7 +319,7 @@ def run_splits(tree_text, acc_to_row, axis_cols, min_side_size, seed):
             "q_bh": float(q_bh[idx, k]),
             "rep_clade": ";".join(sp.sample_accessions(tree, clade_leaves, 5, rng)),
         })
-        print(f"    {axis_cols[k]:>6}: clade={clade_size:5d}/{comp_size:<5d} "
+        print(f"    {comp_names[k]}: clade={clade_size:5d}/{comp_size:<5d} "
               f"|delta|={abs(cliffs):.3f} p={res['p_mwu'][idx, k]:.3e}",
               file=sys.stderr)
     return pd.DataFrame(rows)
@@ -388,11 +388,31 @@ def main():
 
     # --- project onto ICs ------------------------------------------------
     print("Projecting subsample onto IC sequence space (Uᵖ)...", file=sys.stderr)
-    up = project_subsample(sca_dir, msa_sub)           # (n_sub, K)
+    from mysca.results import SCAResults
+    sca = SCAResults.load(sca_dir)
+    up = project_subsample(sca, msa_sub)               # (n_sub, K)
     K = up.shape[1]
     axis_cols = [f"Up_{k}" for k in range(K)]
+    comp_names = [f"{family}_{c}" for c in axis_cols]  # e.g. PF00001_Up_0
     acc_to_row = {lab: up[i] for i, lab in enumerate(labels)}
     print(f"  {K} ICs projected.", file=sys.stderr)
+
+    # Per-IC SCA quantities: component magnitude (lambda = i-th SCA eigenvalue)
+    # and the position-wise correlation of the IC loading with conservation.
+    conservation = np.asarray(sca.conservation, dtype=np.float64)
+    v_ica = np.asarray(sca.v_ica, dtype=np.float64)        # (L, K) loadings
+    evals_sca = np.asarray(sca.evals_sca, dtype=np.float64)
+    ic_rows = []
+    for k in range(K):
+        r, p = stats.pearsonr(v_ica[:, k], conservation)
+        ic_rows.append({"component": comp_names[k],
+                        "lambda": float(evals_sca[k]),
+                        "cons_corr_r": float(r), "cons_corr_p": float(p)})
+    ic_df = pd.DataFrame(ic_rows)
+    # Benjamini-Hochberg FDR across this family's K ICs (within-family
+    # multiple-testing correction; matches notebook cell 3).
+    ic_df["cons_corr_p_adj"] = stats.false_discovery_control(
+        ic_df["cons_corr_p"].to_numpy())
 
     # Persist the label<->id<->Up mapping for traceability.
     proj_df = pd.DataFrame({"label": labels, "seq_id": ids_sub})
@@ -417,12 +437,14 @@ def main():
 
     # --- per-IC analyses -------------------------------------------------
     print("\nPagel's lambda per IC:", file=sys.stderr)
-    pagel_df = run_pagel(tree_text, acc_to_row, axis_cols,
+    pagel_df = run_pagel(tree_text, acc_to_row, comp_names,
                          transform=not args.no_transform,
                          aligned_seqs=aligned_seqs,
                          n_null=args.null_projections, seed=args.seed)
+    # Prepend the SCA magnitude + conservation-correlation columns.
+    pagel_df = ic_df.merge(pagel_df, on="component", how="right")
     print("\nBest clade split per IC:", file=sys.stderr)
-    splits_df = run_splits(tree_text, acc_to_row, axis_cols,
+    splits_df = run_splits(tree_text, acc_to_row, comp_names,
                            args.min_side_size, args.seed)
 
     # --- write + report --------------------------------------------------
@@ -436,7 +458,8 @@ def main():
         on="component", how="left", suffixes=("_pagel", "_split"))
 
     # Focused console view; full detail is in the TSVs.
-    show = ["component", "lambda", "LRT", "lrt_z", "p_lrt_vs_null_BH",
+    show = ["component", "lambda", "cons_corr_r", "cons_corr_p_adj",
+            "lamP", "lrt_z", "p_lrt_vs_null_BH",
             "clade_size", "abs_cliffs_delta", "q_bh"]
     show = [c for c in show if c in combined.columns]
 
