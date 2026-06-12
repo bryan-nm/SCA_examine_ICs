@@ -212,7 +212,15 @@ def main():
 
     # --- IC residues on the structure -----------------------------------
     from mysca.results import SCAResults
-    groups = SCAResults.load(os.path.join(results_dir, "scacore")).ic_positions
+    sca = SCAResults.load(os.path.join(results_dir, "scacore"))
+    # Restrict to the kstar significant ICs (first kstar by descending SCA
+    # eigenvalue) so the per-IC contiguity rows and the cross-IC reciprocal-
+    # contact fraction (computed over the other K-1 ICs) both count only
+    # significant ICs — matching SCA_analysis.py's Up_0..Up_{kstar-1}.
+    groups = sca.ic_positions
+    kstar = int(sca.kstar) if sca.kstar is not None else len(groups)
+    kstar = max(1, min(kstar, len(groups)))
+    groups = groups[:kstar]
     ic_residues, offset = reference_ic_residues(results_dir, ref_id, groups, pdb_seq)
     K = len(ic_residues)
     sizes = [len(p) for p in ic_residues]

@@ -118,32 +118,14 @@ done
 wait                             # drain the remaining workers
 
 # ---- aggregate one master per-IC table across all families -----------------
-# Merges each family's pagel + split TSVs (one row per IC) and concatenates.
-# Idempotent: rebuilt from whatever per-family results currently exist, so a
-# resumed/partial run still yields an up-to-date table.
+# Delegate to the standalone aggregate_results.sh so the merge logic (pagel +
+# split + structure contiguity + cross-IC reciprocal contacts, with log backfill)
+# lives in one place. Idempotent: rebuilt from whatever per-family results
+# currently exist, so a resumed/partial run still yields an up-to-date table.
 AGG="${AGG:-$OUTDIR/all_families_ic_results.tsv}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 log "aggregating per-family results -> $AGG"
-"$PYTHON" - "$OUTDIR" "$AGG" <<'PY'
-import glob, os, sys
-import pandas as pd
-
-outdir, agg_path = sys.argv[1], sys.argv[2]
-frames = []
-for pagel in sorted(glob.glob(os.path.join(outdir, "*", "pagel_lambda_results.tsv"))):
-    fam_dir = os.path.dirname(pagel)
-    df = pd.read_csv(pagel, sep="\t")
-    split = os.path.join(fam_dir, "best_split_per_ic.tsv")
-    if os.path.exists(split):
-        df = df.merge(pd.read_csv(split, sep="\t"), on="component", how="left")
-    df.insert(0, "family", os.path.basename(fam_dir))
-    frames.append(df)
-
-if not frames:
-    print("no per-family results found; nothing to aggregate", file=sys.stderr)
-    sys.exit(0)
-master = pd.concat(frames, ignore_index=True)
-master.to_csv(agg_path, sep="\t", index=False, float_format="%.6g")
-print(f"wrote {agg_path}: {len(master)} IC rows from {len(frames)} families",
-      file=sys.stderr)
-PY
+OUTDIR="$OUTDIR" AGG="$AGG" LOGDIR="$LOGDIR" PYTHON="$PYTHON" \
+    bash "$SCRIPT_DIR/aggregate_results.sh" "$OUTDIR" "$AGG" \
+    || log "aggregation FAILED"
 log "ALL DONE"

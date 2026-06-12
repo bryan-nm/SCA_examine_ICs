@@ -18,16 +18,38 @@ OUTDIR="${1:-${OUTDIR:-$PWD/pfam_run/results}}"
 AGG="${2:-${AGG:-$OUTDIR/all_families_ic_results.tsv}}"
 PYTHON="${PYTHON:-python}"
 CROSS_THRESH="${CROSS_THRESH:-5.0}"   # Å; IC pair "in contact" below this (matches structure_analysis default)
+LOGDIR="${LOGDIR:-$(dirname "$OUTDIR")/logs}"   # per-family .err logs; backfills align_length / n_seqs
 
 [ -d "$OUTDIR" ] || { echo "OUTDIR not found: $OUTDIR" >&2; exit 1; }
 echo "aggregating per-family results under $OUTDIR -> $AGG" >&2
 
-"$PYTHON" - "$OUTDIR" "$AGG" "$CROSS_THRESH" <<'PY'
-import glob, os, sys
+"$PYTHON" - "$OUTDIR" "$AGG" "$CROSS_THRESH" "$LOGDIR" <<'PY'
+import glob, os, re, sys
 import numpy as np
 import pandas as pd
 
-outdir, agg_path, cross_thresh = sys.argv[1], sys.argv[2], float(sys.argv[3])
+outdir, agg_path, cross_thresh, logdir = (sys.argv[1], sys.argv[2],
+                                          float(sys.argv[3]), sys.argv[4])
+
+# "Sequences:   232620 total, 232620 non-empty, L=230" (SCA_analysis stderr).
+# Lets runs whose TSVs predate the align_length/n_seqs columns still report
+# family size + alignment length without re-running.
+_SEQ_RE = re.compile(r"Sequences:\s+(\d+)\s+total,\s+\d+\s+non-empty,\s+L=(\d+)")
+
+def seq_line_fields(fam):
+    for ext in (".err", ".log"):
+        path = os.path.join(logdir, fam + ext)
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, errors="replace") as fh:
+                for line in fh:
+                    m = _SEQ_RE.search(line)
+                    if m:
+                        return int(m.group(1)), int(m.group(2))  # n_seqs, L
+        except OSError:
+            pass
+    return None, None
 
 # Recursive so it works regardless of how deep <family>/ sits under OUTDIR.
 pagels = sorted(glob.glob(os.path.join(outdir, "**", "pagel_lambda_results.tsv"),
@@ -72,10 +94,15 @@ for pagel in pagels:
                 ndf = pd.read_csv(nbr, sep="\t")
                 if not ndf.empty and "IC" in ndf.columns:
                     k = ndf["IC"].astype(str).str.extract(r"(\d+)")[0]
+                    # struct_n_res = IC positions resolved in THIS reference
+                    # structure (gapped reference positions dropped); generally
+                    # <= the true SCA IC size (ic_n_residues) and reference-
+                    # dependent. It is the "residues/IC" number from the log.
                     ndf = ndf.assign(component=fam + "_Up_" + k)[
-                        ["component", "mean_nbr_dist", "z", "p_clustered"]].rename(
-                        columns={"mean_nbr_dist": "struct_mean_nbr_dist",
-                                 "z": "struct_z", "p_clustered": "struct_p_clustered"})
+                        ["component", "n_res", "mean_nbr_dist", "z", "p_clustered"]
+                    ].rename(columns={"n_res": "struct_n_res",
+                                      "mean_nbr_dist": "struct_mean_nbr_dist",
+                                      "z": "struct_z", "p_clustered": "struct_p_clustered"})
                     df = df.merge(ndf, on="component", how="left")
                 else:
                     no_struct += 1
@@ -115,6 +142,15 @@ for pagel in pagels:
                 no_cross += 1
         else:
             no_cross += 1
+
+        # Backfill family size + alignment length from the run log for older
+        # runs whose pagel TSV predates these columns (newer runs already have
+        # them, so only fill when absent).
+        if "n_seqs" not in df.columns or "align_length" not in df.columns:
+            ns, L = seq_line_fields(fam)
+            if ns is not None:
+                df["n_seqs"] = ns
+                df["align_length"] = L
 
         df.insert(0, "family", fam)
         frames.append(df)

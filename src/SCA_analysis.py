@@ -390,23 +390,44 @@ def main():
     print("Projecting subsample onto IC sequence space (Uᵖ)...", file=sys.stderr)
     from mysca.results import SCAResults
     sca = SCAResults.load(sca_dir)
-    up = project_subsample(sca, msa_sub)               # (n_sub, K)
+    up = project_subsample(sca, msa_sub)               # (n_sub, n_components)
+    # Keep only the kstar *significant* ICs. ICs are ordered by descending SCA
+    # eigenvalue, so the bootstrap-significant ones are exactly the first kstar
+    # columns (mysca's convention: IC i is significant iff i < kstar); the
+    # remaining n_components-kstar ICs are computed but not significant. All
+    # downstream per-IC arrays (v_ica, evals_sca, ic_positions) share this
+    # ordering, so a single [:kstar] slice keeps everything aligned.
+    n_comp = up.shape[1]
+    kstar = int(sca.kstar) if sca.kstar is not None else n_comp
+    kstar = max(1, min(kstar, n_comp))
+    up = up[:, :kstar]
     K = up.shape[1]
     axis_cols = [f"Up_{k}" for k in range(K)]
     comp_names = [f"{family}_{c}" for c in axis_cols]  # e.g. PF00001_Up_0
     acc_to_row = {lab: up[i] for i, lab in enumerate(labels)}
-    print(f"  {K} ICs projected.", file=sys.stderr)
+    print(f"  {K} significant ICs projected (kstar={kstar} of "
+          f"{n_comp} computed).", file=sys.stderr)
 
-    # Per-IC SCA quantities: component magnitude (lambda = i-th SCA eigenvalue)
-    # and the position-wise correlation of the IC loading with conservation.
+    # Per-IC SCA quantities: component magnitude (lambda = i-th SCA eigenvalue),
+    # the position-wise correlation of the IC loading with conservation, the
+    # number of alignment positions assigned to the IC and its fraction of the
+    # alignment, plus family-level size (repeated per IC for the flat table).
     conservation = np.asarray(sca.conservation, dtype=np.float64)
     v_ica = np.asarray(sca.v_ica, dtype=np.float64)        # (L, K) loadings
     evals_sca = np.asarray(sca.evals_sca, dtype=np.float64)
+    groups = sca.ic_positions                              # per-IC position lists
+    align_length = int(msa.shape[1])                       # L, processed columns
+    n_seqs = int(msa.shape[0])                             # sequences in family
     ic_rows = []
     for k in range(K):
         r, p = stats.pearsonr(v_ica[:, k], conservation)
+        n_res = int(len(groups[k]))
         ic_rows.append({"component": comp_names[k],
                         "lambda": float(evals_sca[k]),
+                        "ic_n_residues": n_res,
+                        "ic_frac_residues": n_res / align_length,
+                        "align_length": align_length,
+                        "n_seqs": n_seqs,
                         "cons_corr_r": float(r), "cons_corr_p": float(p)})
     ic_df = pd.DataFrame(ic_rows)
     # Benjamini-Hochberg FDR across this family's K ICs (within-family
@@ -458,14 +479,15 @@ def main():
         on="component", how="left", suffixes=("_pagel", "_split"))
 
     # Focused console view; full detail is in the TSVs.
-    show = ["component", "lambda", "cons_corr_r", "cons_corr_p_adj",
+    show = ["component", "lambda", "ic_n_residues", "ic_frac_residues",
+            "cons_corr_r", "cons_corr_p_adj",
             "lamP", "lrt_z", "p_lrt_vs_null_BH",
             "clade_size", "abs_cliffs_delta", "q_bh"]
     show = [c for c in show if c in combined.columns]
 
     print("\n" + "=" * 78)
     print(f"{family}: per-IC phylogenetic signal vs. null and best clade split "
-          f"(n={int(pagel_df['n'].iloc[0])})")
+          f"(n_seqs={n_seqs}, L={align_length}, n_tips={int(pagel_df['n'].iloc[0])})")
     print("=" * 78)
     with pd.option_context("display.float_format", "{:.4g}".format,
                            "display.width", 200, "display.max_columns", None):
