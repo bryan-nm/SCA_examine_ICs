@@ -66,6 +66,11 @@ for pagel in pagels:
             raise ValueError("empty pagel table")
         if "component" not in df.columns:
             raise ValueError("no 'component' column (malformed/partial table)")
+        # kstar = number of significant ICs for this family. SCA_analysis.py
+        # keeps only the top-kstar significant ICs (one pagel row per IC), so
+        # the pagel table's row count is exactly this family's kstar. Repeated
+        # per IC row, like n_seqs / align_length.
+        df["kstar"] = len(df)
         # An empty best_split_per_ic.tsv just means no IC had a valid clade
         # split (common for small families) — benign, keep pagel columns only.
         split = os.path.join(fam_dir, "best_split_per_ic.tsv")
@@ -119,6 +124,11 @@ for pagel in pagels:
         # and IC j touch reciprocally iff BOTH directions are < cross_thresh.
         # Report, per IC, the fraction of the other K-1 ICs it reciprocally
         # contacts.
+        #
+        # Orientation for the per-IC summaries below: a distance measured OVER
+        # IC i's own residues (the query) to IC j is cross[j, i] (column i) --
+        # same residue basis as IC i's within-IC struct_mean_nbr_dist, so the
+        # two are directly comparable.
         cross_f = os.path.join(fam_dir, "ic_cross_neighbor_distance.tsv")
         if os.path.exists(cross_f) and os.path.getsize(cross_f) > 1:
             try:
@@ -131,9 +141,38 @@ for pagel in pagels:
                     np.fill_diagonal(recip, False)          # exclude self
                     frac = (recip.sum(axis=1) / (Kc - 1)
                             if Kc > 1 else np.full(Kc, np.nan))
+
+                    # Off-diagonal cross distances over IC i's residues = col i.
+                    Coff = C.astype(float).copy()
+                    np.fill_diagonal(Coff, np.nan)          # drop self
+                    comps = [f"{fam}_Up_{i}" for i in range(Kc)]
+                    if Kc > 1:
+                        with np.errstate(invalid="ignore"):
+                            # min over the other ICs of the distance to IC i.
+                            min_cross = np.nanmin(Coff, axis=0)
+                        min_cross = np.where(np.all(np.isnan(Coff), axis=0),
+                                             np.nan, min_cross)
+                        # n other ICs sitting closer to IC i's residues than IC
+                        # i's own mean neighbour distance (struct_mean_nbr_dist).
+                        mnd_map = (df.set_index("component")["struct_mean_nbr_dist"]
+                                   if "struct_mean_nbr_dist" in df.columns else None)
+                        if mnd_map is not None:
+                            mnd = np.array([mnd_map.get(c, np.nan) for c in comps],
+                                           dtype=float)
+                            with np.errstate(invalid="ignore"):
+                                n_closer = (Coff < mnd[None, :]).sum(axis=0).astype(float)
+                            n_closer[np.isnan(mnd)] = np.nan   # undefined w/o self dist
+                        else:
+                            n_closer = np.full(Kc, np.nan)
+                    else:
+                        min_cross = np.full(Kc, np.nan)       # only one IC, no "other"
+                        n_closer = np.full(Kc, np.nan)
+
                     df = df.merge(pd.DataFrame({
-                        "component": [f"{fam}_Up_{i}" for i in range(Kc)],
+                        "component": comps,
                         "struct_recip_contact_frac": frac,
+                        "struct_min_cross_nbr_dist": min_cross,
+                        "struct_n_cross_closer_than_self": n_closer,
                     }), on="component", how="left")
                 else:
                     no_cross += 1
